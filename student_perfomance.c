@@ -327,6 +327,110 @@ void remove_student()
     printf("Student removed succesfully!");
 }
 
+void risk_index_calc()
+{
+    students *ptr;
+    students *lowest;
+    float risk_index;
+    float improvement;
+    float total_grade = 0;
+    float average;
+
+    int critical = 0;
+    int high = 0;
+    int moderate = 0;
+    int low = 0;
+    int passed = 0;
+
+    if (count == 0)
+    {
+        printf("No student records available.\n");
+        return;
+    }
+
+    lowest = s;
+
+    printf("\n========== ACADEMIC RISK ASSESSMENT ==========\n");
+
+    for (ptr = s; ptr < s + count; ptr++)
+    {
+        total_grade += ptr->grade;
+
+        if (ptr->grade < lowest->grade)
+            lowest = ptr;
+
+        improvement = 60 - ptr->grade;
+
+        if (ptr->grade < 20)
+        {
+            critical++;
+            printf("\nStudent: %s\n", ptr->name);
+            printf("Risk Level: CRITICAL\n");
+        }
+        else if (ptr->grade < 40)
+        {
+            high++;
+            printf("\nStudent: %s\n", ptr->name);
+            printf("Risk Level: HIGH\n");
+        }
+        else if (ptr->grade < 50)
+        {
+            moderate++;
+            printf("\nStudent: %s\n", ptr->name);
+            printf("Risk Level: MODERATE\n");
+        }
+        else if (ptr->grade < 60)
+        {
+            low++;
+            printf("\nStudent: %s\n", ptr->name);
+            printf("Risk Level: LOW\n");
+        }
+        else
+        {
+            passed++;
+            printf("\nStudent: %s\n", ptr->name);
+            printf("Risk Level: NO RISK - PASS\n");
+        }
+
+        /* Calculate numerical risk index */
+        if (ptr->grade < 60)
+            risk_index = (improvement / 60) * 100;
+        else
+            risk_index = 0;
+
+        printf("Student ID: %d\n", ptr->id);
+        printf("Current Grade: %.2f\n", ptr->grade);
+        printf("Risk Index: %.2f/100\n", risk_index);
+
+        if (improvement > 0)
+            printf("Marks needed to pass: %.2f\n", improvement);
+        else
+            printf("Student has achieved the pass mark.\n");
+
+        printf("----------------------------------------------\n");
+    }
+
+    average = total_grade / count;
+
+    printf("\n========== CLASS RISK SUMMARY ==========\n");
+    printf("Total students: %d\n", count);
+    printf("Class average: %.2f\n", average);
+
+    printf("\nRisk distribution:\n");
+    printf("Critical risk: %d\n", critical);
+    printf("High risk: %d\n", high);
+    printf("Moderate risk: %d\n", moderate);
+    printf("Low risk: %d\n", low);
+    printf("Passed: %d\n", passed);
+
+    printf("\nStudent requiring the most support:\n");
+    printf("Name: %s\n", lowest->name);
+    printf("Grade: %.2f\n", lowest->grade);
+    printf("Marks needed to pass: %.2f\n", 60 - lowest->grade);
+
+    printf("========================================\n");
+}
+
 void sort_students()
 {
     int sort_type;
@@ -372,6 +476,101 @@ void top_student()
 
 
 }
+
+void summary_report(void)
+{
+    students *ptr;
+    students *highest;
+    students *lowest;
+
+    float total = 0;
+    float average;
+
+    int passed = 0;
+    int failed = 0;
+
+    int critical = 0;
+    int high = 0;
+    int moderate = 0;
+    int low = 0;
+
+    if (count == 0)
+    {
+        printf("No student records available.\n");
+        return;
+    }
+
+    highest = s;
+    lowest = s;
+
+    /* Traverse the student records using pointer arithmetic */
+    for (ptr = s; ptr < s + count; ptr++)
+    {
+        total += ptr->grade;
+
+        if (ptr->grade > highest->grade)
+            highest = ptr;
+
+        if (ptr->grade < lowest->grade)
+            lowest = ptr;
+
+        /* Pass and fail count */
+        if (ptr->grade >= 60)
+            passed++;
+        else
+            failed++;
+
+        /* Custom risk analysis */
+        if (ptr->grade < 20)
+            critical++;
+        else if (ptr->grade < 40)
+            high++;
+        else if (ptr->grade < 50)
+            moderate++;
+        else if (ptr->grade < 60)
+            low++;
+    }
+
+    average = total / count;
+
+    /* Display summary report */
+    printf("\n");
+    printf("============================================\n");
+    printf("          ACADEMIC SUMMARY REPORT           \n");
+    printf("============================================\n");
+
+    printf("\nGENERAL STATISTICS\n");
+    printf("--------------------------------------------\n");
+    printf("Total student records: %d\n", count);
+    printf("Average grade: %.2f\n", average);
+
+    printf("\nHIGHEST PERFORMING STUDENT\n");
+    printf("--------------------------------------------\n");
+    printf("Name: %s\n", highest->name);
+    printf("Student ID: %d\n", highest->id);
+    printf("Grade: %.2f\n", highest->grade);
+
+    printf("\nLOWEST PERFORMING STUDENT\n");
+    printf("--------------------------------------------\n");
+    printf("Name: %s\n", lowest->name);
+    printf("Student ID: %d\n", lowest->id);
+    printf("Grade: %.2f\n", lowest->grade);
+
+    printf("\nPASS AND FAIL STATISTICS\n");
+    printf("--------------------------------------------\n");
+    printf("Students who passed: %d\n", passed);
+    printf("Students below pass threshold: %d\n", failed);
+
+    printf("\nCUSTOM ANALYSIS: ACADEMIC RISK DISTRIBUTION\n");
+    printf("--------------------------------------------\n");
+    printf("Critical risk: %d\n", critical);
+    printf("High risk: %d\n", high);
+    printf("Moderate risk: %d\n", moderate);
+    printf("Low risk: %d\n", low);
+
+    printf("\n============================================\n");
+}
+
 int main(void)
 {
 //create our own dataset
@@ -399,7 +598,7 @@ int main(void)
     }
 
     //initialize an array of funtion pointers
-    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade, top_student, remove_student};
+    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade, top_student, remove_student, risk_index_calc, summary_report};
     int choice, ch;
     do
     {
@@ -411,25 +610,23 @@ int main(void)
         printf("4. Calculate Average Grade\n");
         printf("5. Identify the top-performing student\n");
         printf("6. Remove student\n");
+        printf("7. Calculate risk score based on the student's grade\n");
+        printf("8. Generate summary report\n");
         printf("9. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
         while ((ch = getchar()) != '\n' && ch != EOF);
 
-        if (choice >= 0 && choice < 10)
+        if (choice == 9)
+        {
+            printf("Exiting...\n");
+            break;
+        }
+        if (choice >= 0 && choice < 9)
             fun_ptr[choice]();
         else
             printf("Invalid choice.\n");
 
     } while (choice != 9);
     free(s);
-//enable data set to grow or shrink i.e make it dynamic
-//10 functionalities + exit
-//array of function pointers for the ten
-//allocate memory in a way that the meory can grow or shrink when students are added or subtracted
-//ensure to use pointer arithmetic at list once
-//string operation functions i.e strcmp
-//one original analysis
-//summary reported format as provided
-
 }
