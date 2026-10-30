@@ -263,6 +263,24 @@ void avg_grade()
     printf("\nThe Average Grade of the students is: %.2f\n", sum / count);
 }
 
+void top_student()
+{
+    int max = 0;
+    int pos = 0;
+    for (int i = 0; i < count; i++)
+    {
+        if (max < s[i].grade)
+        {
+            max = s[i].grade;
+            pos = i;
+        }
+    }
+
+    printf("\nThe top student is:\n");
+    printf("%s, taking a course in %s, with a grade of %.2f\n", s[pos].name, s[pos].course, s[pos].grade);
+
+
+}
 int main(void)
 {
 //create our own dataset
@@ -290,7 +308,7 @@ int main(void)
     }
 
     //initialize an array of funtion pointers
-    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade};
+    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade, top_student};
     int choice, ch;
     do
     {
@@ -300,6 +318,7 @@ int main(void)
         printf("2. Sort Students\n");
         printf("3. Display Student Records\n");
         printf("4. Calculate Average Grade\n");
+        printf("5. Identify the top-performing student\n");
         printf("9. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
