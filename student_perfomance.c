@@ -208,10 +208,32 @@ void add_student()
 
 }
 
-void display_students()
+void display_students(void)
 {
+    if (count == 0)
+    {
+        printf("No student records available.\n");
+        return;
+    }
 
+    printf("\n--------------------------------------------------------------------------\n");
+    printf("%-10s %-25s %-25s %-10s\n",
+           "ID", "NAME", "COURSE", "GRADE");
+    printf("--------------------------------------------------------------------------\n");
+
+    for (int i = 0; i < count; i++)
+    {
+        printf("%-10d %-25s %-25s %-10.2f\n",
+               s[i].id,
+               s[i].name,
+               s[i].course,
+               s[i].grade);
+    }
+
+    printf("--------------------------------------------------------------------------\n");
+    printf("Total students: %d\n", count);
 }
+
 
 
 void sort_students()
@@ -233,6 +255,13 @@ void sort_students()
     }
 }
 
+void avg_grade()
+{
+    float sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += s[i].grade;
+    printf("\nThe Average Grade of the students is: %.2f\n", sum / count);
+}
 
 int main(void)
 {
@@ -261,25 +290,27 @@ int main(void)
     }
 
     //initialize an array of funtion pointers
-    void (*fun_ptr[])(void) = {add_student, search_student, sort_students};
+    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade};
     int choice, ch;
     do
     {
         printf("\nMenu:\n");
         printf("0. Add Student\n");
         printf("1. Search for a Student\n");
-        printf("2. Sort Students\n\n");
-        printf("3. Exit\n");
+        printf("2. Sort Students\n");
+        printf("3. Display Student Records\n");
+        printf("4. Calculate Average Grade\n");
+        printf("9. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
         while ((ch = getchar()) != '\n' && ch != EOF);
 
-        if (choice >= 0 && choice < 4)
+        if (choice >= 0 && choice < 10)
             fun_ptr[choice]();
         else
             printf("Invalid choice.\n");
 
-    } while (choice != 3);
+    } while (choice != 9);
     free(s);
 //enable data set to grow or shrink i.e make it dynamic
 //10 functionalities + exit
