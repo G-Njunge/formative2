@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
+#include <ctype.h>
 
 typedef struct{
     int id;
@@ -64,6 +66,7 @@ int get_number(const char *prompt, void *value, char type)
 void get_string(const char *prompt, char *value, size_t size)
 {
     int ch;
+    int has_letter;
     size_t len;
 
     while (1)
@@ -75,7 +78,6 @@ void get_string(const char *prompt, char *value, size_t size)
 
         len = strlen(value);
 
-        /* Check whether the entire input fits */
         if (len > 0 && value[len - 1] != '\n')
         {
             while ((ch = getchar()) != '\n' && ch != EOF)
@@ -85,14 +87,29 @@ void get_string(const char *prompt, char *value, size_t size)
             continue;
         }
 
-        /* Remove the newline */
         if (len > 0 && value[len - 1] == '\n')
             value[len - 1] = '\0';
 
-        /* Reject empty input */
         if (value[0] == '\0')
         {
             printf("Input cannot be empty.\n");
+            continue;
+        }
+
+        has_letter = 0;
+
+        for (int i = 0; value[i] != '\0'; i++)
+        {
+            if (isalpha((unsigned char)value[i]))
+            {
+                has_letter = 1;
+                break;
+            }
+        }
+
+        if (!has_letter)
+        {
+            printf("Input must contain at least one letter.\n");
             continue;
         }
 
@@ -149,14 +166,40 @@ int compare_name(const void *a, const void *b)
 
 void search_student()
 {
-    int id, index;
-    if (get_number("Student ID: ", &id, 'i') != 1)
-            return;
-    index = id_search(id);
-    if (index == -1)
-    {
-        printf("This student ID doesn't exist in our system.\n");
+    int id, search_type;
+    char stud_name[50];
+    int index = -1;
+    if (get_number("How would you like to search for the students?\n0.Using a Student ID\n1.Using a Student name\nType in a number between 0-1: ", &search_type, 'i')!=1)
         return;
+    if (search_type >1 || search_type < 0)
+    {
+        printf("Input a value between 0 - 1");
+        return;
+    }
+    if (search_type == 0)
+    {
+        if (get_number("Student ID: ", &id, 'i') != 1)
+                return;
+        index = id_search(id);
+        if (index == -1)
+        {
+            printf("This student ID doesn't exist in our system.\n");
+            return;
+        }
+    }
+    else
+    {
+        get_string("Student's Full Name: ", stud_name, sizeof(stud_name));
+        for (int i = 0; i < count; i++)
+        {
+            if (strcasecmp(stud_name, s[i].name) == 0)
+                index = i;
+        }
+        if (index == -1)
+        {
+            printf("This student name doesn't exist in our system.\n");
+            return;
+        }
     }
     printf("\nStudent found!\nStudent ID: %d\nStudent name: %s\nStudent Course: %s\nStudent Grade: %.2f\n", s[index].id, s[index].name, s[index].course, s[index].grade);
 }
@@ -233,15 +276,63 @@ void display_students(void)
     printf("--------------------------------------------------------------------------\n");
     printf("Total students: %d\n", count);
 }
+void remove_student()
+{
+    int id,pos;
+    char choice[4];
 
+    if (count <= capacity/2)
+    {
+        students *temp;
+        temp = realloc(s, (capacity / 2)  * sizeof(students));
+        if (temp == NULL)
+        {
+            printf("Memory allocation failed.\n");
+            return;
+        }
+        s = temp;
+        capacity /= 2;
+    }
 
+    if (get_number("ID of the student you would love to remove: ", &id, 'i') != 1)
+        return;
+    get_string("Are you sure you want to proceed?\nType in 'yes'to proceed and any other letter to go back to the main menu", choice, sizeof(choice));
+
+    if (strcasecmp(choice, "yes") != 0)
+        return;
+    int index = id_search(id);
+    if (index == -1)
+    {
+        printf("Student ID doesnt exists in our system\n");
+        return;
+    }
+    else
+    {
+        for (int i = 0; i < count; i++)
+        {
+            if(id == s[i].id)
+            {
+                for (pos = i; pos < count -1; pos ++)
+                {
+                    s[pos].id = s[pos+1].id;
+                    strcpy(s[pos].name,s[pos+1].name);
+                    strcpy(s[pos].course,s[pos+1].course);
+                    s[pos].grade = s[pos+1].grade;
+                }
+            }
+
+        }
+    }
+    count --;
+    printf("Student removed succesfully!");
+}
 
 void sort_students()
 {
     int sort_type;
     if (get_number("What do you want to sort the student records by?\n0.Student ID: \n1.Studenst Grades: \n2.Student Names: \nType in a number between 0-2: ", &sort_type, 'i')!=1)
         return;
-    if (sort_type > 2)
+    if (sort_type >2 || sort_type < 0)
     {
         printf("Input a value between 0 - 2");
         return;
@@ -308,7 +399,7 @@ int main(void)
     }
 
     //initialize an array of funtion pointers
-    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade, top_student};
+    void (*fun_ptr[])(void) = {add_student, search_student, sort_students, display_students, avg_grade, top_student, remove_student};
     int choice, ch;
     do
     {
@@ -319,6 +410,7 @@ int main(void)
         printf("3. Display Student Records\n");
         printf("4. Calculate Average Grade\n");
         printf("5. Identify the top-performing student\n");
+        printf("6. Remove student\n");
         printf("9. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
