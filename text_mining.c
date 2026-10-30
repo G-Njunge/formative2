@@ -5,8 +5,10 @@
  * Chimamanda Ngozi Adichie, pasted in by the user at run time.
  *
  * TEXT-PROCESSING RULES
- *   Case        - every ASCII letter is converted to lowercase, so "Papa" and
- *                 "papa" are the same word.
+ *   Case        - every ASCII letter and every accented Latin-1 capital (U+00C0
+ *                 to U+00DE) is converted to lowercase, so "Papa"/"papa" and
+ *                 "Étagère"/"étagère" are the same word. Other scripts are
+ *                 kept as typed.
  *   Punctuation - any character that is not a letter or digit separates words
  *                 (spaces, tabs, newlines, . , ; : ! ? " ( ) and so on).
  *                 Repeated whitespace and punctuation is skipped as one gap.
@@ -25,25 +27,33 @@
  *                 truncated, and their true length is kept in wordStat.length.
  *                 Two long words that share the same first 39 bytes are
  *                 counted as one word.
+ *   Sorting     - alphabetical order is strcmp byte order, so words starting
+ *                 with an accented letter ("étagère") sort after "z".
  *
  * CUSTOM ANALYSIS: Lexical Richness Profile
  *   N  = total words (tokens), V = distinct words (types),
- *   V1 = hapax legomena (words that occur exactly once)
- *   Type-token ratio      TTR = V / N
- *   Hapax ratio               = V1 / V
- *   Repetition intensity      = (N - V1) / N   (share of tokens that repeat)
- *   Honore's R                = 100 * ln(N) / (1 - V1 / V)
- *   TTR falls as texts get longer, so Honore's R is included because it is less
- *   sensitive to length. A higher R means a richer, less repetitive vocabulary.
+ *   V1 = hapax legomena (words that occur exactly once), W = 50 (window size)
+ *   Type-token ratio      TTR   = V / N
+ *   Moving-average TTR    MATTR = average of (distinct words / W) over every
+ *                                 window of W consecutive words
+ *   Hapax ratio                 = V1 / V
+ *   Repetition intensity        = (N - V1) / N   (share of tokens that repeat)
  *
- * Build: gcc -Wall -Wextra -o text_mining text_mining.c -lm
+ *   Plain TTR falls as a text gets longer (common words keep coming back), so
+ *   it cannot be compared across texts of different length. MATTR always looks
+ *   at windows of the same size, so it stays on the 0-1 TTR scale without the
+ *   length bias. The verdict is therefore based on MATTR. Texts shorter than W
+ *   words only get TTR, with a warning that it overstates variety.
+ *   Verdict bands for MATTR (rough guide chosen for this program):
+ *     >= 0.80 very varied, >= 0.70 varied, >= 0.60 moderate, below repetitive.
+ *
+ * Build: gcc -Wall -Wextra -o text_mining text_mining.c
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <math.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -60,6 +70,7 @@
 
 #define MAX_WORD_LEN 39
 #define MIN_WORDS_REQUIRED 150
+#define MATTR_WINDOW 50
 
 /* Deliberately small starting sizes so the buffers visibly grow with realloc */
 #define TEXT_INITIAL_CAP 64
@@ -134,6 +145,25 @@ int is_end_marker(const char *line, size_t len)
     return len == 3 && strncmp(line, "END", 3) == 0;
 }
 
+/* Parses a whole line as a number; "1abc" or "" is rejected rather than read as 1 or 0 */
+int parse_choice(const char *line, int *value)
+{
+    char *end;
+    long n = strtol(line, &end, 10);
+
+    if (end == line)
+        return 0;
+
+    while (isspace((unsigned char)*end))
+        end++;
+
+    if (*end != '\0')
+        return 0;
+
+    *value = (int)n;
+    return 1;
+}
+
 /* ---------------------------------------------------------------------------
  * Pointer-based word extraction
  * ------------------------------------------------------------------------- */
@@ -160,6 +190,19 @@ int utf8_char_len(const unsigned char *p)
             return 1;
 
     return len;
+}
+
+/* Number of characters (not bytes) in a UTF-8 string */
+int utf8_strlen(const char *s)
+{
+    const unsigned char *p;
+    int chars = 0;
+
+    for (p = (const unsigned char *)s; *p != '\0'; p++)
+        if ((*p & 0xC0) != 0x80)
+            chars++;
+
+    return chars;
 }
 
 /* Bytes of whitespace or punctuation at p, or 0 when p starts a word character */
@@ -230,6 +273,11 @@ int next_word(const char **cursor, char *out, int *truncated)
                 else
                 {
                     memcpy(dst, p, n);
+
+                    /* Accented Latin-1 capitals C3 80..C3 9E (except the sign at C3 97) */
+                    if (n == 2 && p[0] == 0xC3 && p[1] <= 0x9E && p[1] != 0x97)
+                        dst[1] = (char)(p[1] + 0x20);
+
                     dst += n;
                 }
             }
@@ -598,20 +646,23 @@ void display_word_statistics(TextAnalysis *t)
 {
     const struct wordStat *entry;
     int rank = 1;
+    int shown;
 
     printf("\nWORD STATISTICS (%s)\n", t->order);
-    printf("%-5s %-25s %6s %7s %8s\n", "No.", "Word", "Count", "Length", "Share");
-    printf("-------------------------------------------------------\n");
+    printf("%-5s %-*s %6s %7s %8s\n", "No.", MAX_WORD_LEN, "Word", "Count", "Length", "Share");
+    printf("---------------------------------------------------------------------\n");
 
     for (entry = t->words; entry < t->words + t->distinct; entry++, rank++)
     {
-        /* Pad by characters rather than bytes so accented words stay aligned */
-        printf("%-5d %s%*s %6d %7d %7.2f%%\n", rank, entry->name,
-               entry->length < 25 ? 25 - entry->length : 0, "", entry->count, entry->length,
-               100.0 * entry->count / t->total_words);
+        /* Pad by the characters actually printed, so accented and truncated words stay aligned */
+        shown = utf8_strlen(entry->name);
+
+        printf("%-5d %s%*s %6d %7d %7.2f%%%s\n", rank, entry->name, MAX_WORD_LEN - shown, "",
+               entry->count, entry->length, 100.0 * entry->count / t->total_words,
+               entry->length > shown ? "  (truncated)" : "");
     }
 
-    printf("-------------------------------------------------------\n");
+    printf("---------------------------------------------------------------------\n");
     printf("Distinct words: %d   Total words: %d\n", t->distinct, t->total_words);
 }
 
@@ -644,9 +695,7 @@ void sort_word_statistics(TextAnalysis *t)
     if (!read_line(line, sizeof line))
         return;
 
-    choice = atoi(line);
-
-    if (choice < 1 || choice > 2)
+    if (!parse_choice(line, &choice) || choice < 1 || choice > 2)
     {
         printf("Invalid choice. Enter 1 or 2.\n");
         return;
@@ -669,7 +718,7 @@ void search_word(TextAnalysis *t)
     if (!read_line(line, sizeof line))
         return;
 
-    /* Normalise the query with the same rules used on the text */
+    /* Normalize the query with the same rules used on the text */
     if (next_word(&cursor, word, NULL) == 0)
     {
         printf("No word was entered.\n");
@@ -685,37 +734,109 @@ void search_word(TextAnalysis *t)
                100.0 * entry->count / t->total_words);
 }
 
+/*
+ * Moving-average type-token ratio: slides a window of MATTR_WINDOW words over
+ * the text and averages the TTR of every window. Returns -1 when the text is
+ * shorter than one window or memory runs out.
+ */
+double moving_average_ttr(const TextAnalysis *t)
+{
+    const char *cursor = t->text;
+    char word[MAX_WORD_LEN + 1];
+    int window[MATTR_WINDOW]; /* ring buffer of word indexes in the current window */
+    int *in_window;           /* how many times each distinct word is in the window */
+    int position = 0;
+    int types = 0;
+    int windows = 0;
+    double total = 0.0;
+    int index;
+
+    if (t->total_words < MATTR_WINDOW)
+        return -1.0;
+
+    in_window = calloc(t->distinct, sizeof *in_window);
+
+    if (in_window == NULL)
+    {
+        printf("Memory allocation failed for the MATTR window.\n");
+        return -1.0;
+    }
+
+    while (next_word(&cursor, word, NULL) > 0)
+    {
+        index = (int)(find_word(t, word) - t->words);
+
+        /* Once the window is full, the oldest word drops out as the new one enters */
+        if (position >= MATTR_WINDOW && --in_window[window[position % MATTR_WINDOW]] == 0)
+            types--;
+
+        if (in_window[index]++ == 0)
+            types++;
+
+        window[position % MATTR_WINDOW] = index;
+        position++;
+
+        if (position >= MATTR_WINDOW)
+        {
+            total += (double)types / MATTR_WINDOW;
+            windows++;
+        }
+    }
+
+    free(in_window);
+    return total / windows;
+}
+
 void lexical_richness_profile(TextAnalysis *t)
 {
     int n = t->total_words;
     int v = t->distinct;
     int v1 = count_hapax(t);
     double ttr = (double)v / n;
+    double mattr = moving_average_ttr(t);
+    double score;
 
     printf("\nCUSTOM ANALYSIS: %s\n", CUSTOM_ANALYSIS);
     printf("Tokens (N) = %d, types (V) = %d, words used once (V1) = %d\n\n", n, v, v1);
 
-    printf("Type-token ratio     V / N             = %.3f\n", ttr);
-    printf("Hapax ratio          V1 / V            = %.3f\n", (double)v1 / v);
-    printf("Repetition intensity (N - V1) / N      = %.3f\n", (double)(n - v1) / n);
+    printf("Type-token ratio     V / N            = %.3f\n", ttr);
 
-    if (v1 == v)
-        printf("Honore's R           undefined, every word is used only once\n");
+    if (mattr >= 0.0)
+        printf("Moving-average TTR   window of %d     = %.3f\n", MATTR_WINDOW, mattr);
     else
-        printf("Honore's R           100 ln N / (1 - V1/V) = %.1f\n", 100.0 * log(n) / (1.0 - (double)v1 / v));
+        printf("Moving-average TTR   needs at least %d words\n", MATTR_WINDOW);
 
-    printf("\nInterpretation: ");
+    printf("Hapax ratio          V1 / V           = %.3f\n", (double)v1 / v);
+    printf("Repetition intensity (N - V1) / N     = %.3f\n", (double)(n - v1) / n);
 
-    if (ttr >= 0.70)
-        printf("very varied vocabulary; almost every word is new.\n");
-    else if (ttr >= 0.50)
-        printf("varied vocabulary with some deliberate repetition.\n");
-    else if (ttr >= 0.35)
-        printf("moderate variety; key words and function words repeat often.\n");
+    printf("\nInterpretation\n");
+
+    if (mattr >= 0.0)
+    {
+        score = mattr;
+        printf("- Plain TTR (%.3f) is lower than MATTR (%.3f) because TTR shrinks as\n", ttr, mattr);
+        printf("  a text grows. MATTR compares equal-sized windows, so the verdict uses it.\n");
+    }
     else
-        printf("highly repetitive vocabulary.\n");
+    {
+        score = ttr;
+        printf("- The text is too short for MATTR, so the verdict uses plain TTR, which\n");
+        printf("  overstates variety in short texts.\n");
+    }
 
-    printf("%.1f%% of the words in the text belong to a word that occurs more than once.\n",
+    printf("- Vocabulary: ");
+
+    if (score >= 0.80)
+        printf("very varied; within any stretch of text most words are new.\n");
+    else if (score >= 0.70)
+        printf("varied, with some repetition of key words.\n");
+    else if (score >= 0.60)
+        printf("moderate; key words and function words come back often.\n");
+    else
+        printf("repetitive; a small set of words carries much of the text.\n");
+
+    printf("- %.1f%% of the distinct words appear only once.\n", 100.0 * v1 / v);
+    printf("- %.1f%% of all words belong to a word that occurs more than once.\n",
            100.0 * (n - v1) / n);
 }
 
@@ -764,19 +885,22 @@ void show_rules(TextAnalysis *t)
     (void)t;
 
     printf("\nTEXT-PROCESSING RULES\n");
-    printf("- Letters are converted to lowercase, so \"Papa\" and \"papa\" are one word.\n");
+    printf("- Letters, including accented capitals like E-acute, are converted to lowercase,\n");
+    printf("  so \"Papa\" and \"papa\" are one word.\n");
     printf("- Spaces, tabs, newlines and punctuation separate words; repeats count as one gap.\n");
     printf("- An apostrophe between letters is kept (didn't, Jaja's). Quote marks are dropped.\n");
     printf("  Curly apostrophes are stored as ' so both spellings match.\n");
     printf("- A hyphen between letters is kept (well-known). Dashes (--, en, em) separate words.\n");
     printf("- Accented letters stay in the word; lengths are counted in characters.\n");
     printf("- Words longer than %d bytes are truncated; their true length is still recorded.\n", MAX_WORD_LEN);
+    printf("- Alphabetical sorting uses strcmp byte order, so accented first letters sort after z.\n");
     printf("\nCUSTOM ANALYSIS FORMULAS\n");
-    printf("  N = total words, V = distinct words, V1 = words used exactly once\n");
+    printf("  N = total words, V = distinct words, V1 = words used exactly once, W = %d\n", MATTR_WINDOW);
     printf("  Type-token ratio     = V / N\n");
+    printf("  Moving-average TTR   = average of (distinct words / W) over every run of W words\n");
     printf("  Hapax ratio          = V1 / V\n");
     printf("  Repetition intensity = (N - V1) / N\n");
-    printf("  Honore's R           = 100 * ln(N) / (1 - V1 / V)\n");
+    printf("  The verdict uses MATTR because plain TTR falls as the text gets longer.\n");
 }
 
 void load_new_paragraph(TextAnalysis *t)
@@ -813,7 +937,7 @@ int main(void)
         {"Custom analysis: " CUSTOM_ANALYSIS, lexical_richness_profile, 1},
         {"Memory inspection", memory_inspection, 1},
         {"Show text-processing rules", show_rules, 0},
-        {"Analyse a new paragraph", load_new_paragraph, 0},
+        {"Analyze a new paragraph", load_new_paragraph, 0},
     };
     const int items = sizeof menu / sizeof menu[0];
     TextAnalysis t = {0};
@@ -844,9 +968,10 @@ int main(void)
         if (!read_line(line, sizeof line))
             break;
 
-        choice = atoi(line);
+        if (!parse_choice(line, &choice))
+            choice = -1;
 
-        if (choice == 0 && strcmp(line, "0") == 0)
+        if (choice == 0)
             break;
 
         if (choice < 1 || choice > items)
@@ -857,7 +982,7 @@ int main(void)
 
         if (menu[choice - 1].needs_text && t.total_words == 0)
         {
-            printf("There is no text to analyse. Choose option %d to enter a paragraph.\n", items);
+            printf("There is no text to analyze. Choose option %d to enter a paragraph.\n", items);
             continue;
         }
 
