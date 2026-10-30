@@ -1,51 +1,8 @@
 /*
  * Dynamic Text Mining and Linguistic Pattern Analyzer
  *
- * Source text: a paragraph (150+ words) from "Purple Hibiscus" by
- * Chimamanda Ngozi Adichie, pasted in by the user at run time.
- *
- * TEXT-PROCESSING RULES
- *   Case        - every ASCII letter and every accented Latin-1 capital (U+00C0
- *                 to U+00DE) is converted to lowercase, so "Papa"/"papa" and
- *                 "Étagère"/"étagère" are the same word. Other scripts are
- *                 kept as typed.
- *   Punctuation - any character that is not a letter or digit separates words
- *                 (spaces, tabs, newlines, . , ; : ! ? " ( ) and so on).
- *                 Repeated whitespace and punctuation is skipped as one gap.
- *   Apostrophes - kept only when they sit between two word characters, so
- *                 "didn't" and "Jaja's" stay one word. Leading or trailing
- *                 apostrophes (quotation marks) are dropped. The curly
- *                 apostrophe (U+2019) is stored as a plain ' so both spellings
- *                 count as the same word.
- *   Hyphens     - kept only between two word characters ("well-known" is one
- *                 word). Double hyphens, en dashes and em dashes separate words.
- *   Accents     - non-ASCII letters such as the e-acute in "etagere" are kept
- *                 as part of the word; word length is measured in characters,
- *                 not bytes.
- *   Long words  - only the first 39 bytes of a word fit in wordStat.name. Longer
- *                 words are truncated at a character boundary, counted as
- *                 truncated, and their true length is kept in wordStat.length.
- *                 Two long words that share the same first 39 bytes are
- *                 counted as one word.
- *   Sorting     - alphabetical order is strcmp byte order, so words starting
- *                 with an accented letter ("étagère") sort after "z".
- *
- * CUSTOM ANALYSIS: Lexical Richness Profile
- *   N  = total words (tokens), V = distinct words (types),
- *   V1 = hapax legomena (words that occur exactly once), W = 50 (window size)
- *   Type-token ratio      TTR   = V / N
- *   Moving-average TTR    MATTR = average of (distinct words / W) over every
- *                                 window of W consecutive words
- *   Hapax ratio                 = V1 / V
- *   Repetition intensity        = (N - V1) / N   (share of tokens that repeat)
- *
- *   Plain TTR falls as a text gets longer (common words keep coming back), so
- *   it cannot be compared across texts of different length. MATTR always looks
- *   at windows of the same size, so it stays on the 0-1 TTR scale without the
- *   length bias. The verdict is therefore based on MATTR. Texts shorter than W
- *   words only get TTR, with a warning that it overstates variety.
- *   Verdict bands for MATTR (rough guide chosen for this program):
- *     >= 0.80 very varied, >= 0.70 varied, >= 0.60 moderate, below repetitive.
+ * Analyzes a paragraph from "Purple Hibiscus" by Chimamanda Ngozi Adichie,
+ * pasted in at run time. Menu option 10 prints the text-processing rules.
  *
  * Build: gcc -Wall -Wextra -o text_mining text_mining.c
  */
@@ -80,7 +37,9 @@ struct wordStat
 {
     char name[MAX_WORD_LEN + 1];
     int count;
-    int length; /* true length in characters, even when name was truncated */
+    /* Words over 39 bytes are cut to fit name, so the real length is kept here.
+       Two long words with the same first 39 bytes count as one word. */
+    int length;
 };
 
 typedef struct
@@ -205,7 +164,11 @@ int utf8_strlen(const char *s)
     return chars;
 }
 
-/* Bytes of whitespace or punctuation at p, or 0 when p starts a word character */
+/*
+ * Bytes of whitespace or punctuation at p, or 0 when p starts a word character.
+ * Anything that is not a letter or digit separates words, and next_word skips
+ * a run of separators as one gap, so repeated spaces or ", " do not matter.
+ */
 int separator_len(const unsigned char *p)
 {
     if (*p < 0x80)
@@ -222,7 +185,11 @@ int separator_len(const unsigned char *p)
     return 0;
 }
 
-/* Bytes of an apostrophe or hyphen at p, storing the character to keep in *as */
+/*
+ * Bytes of an apostrophe or hyphen at p, storing the character to keep in *as.
+ * next_word only keeps one between two word characters, so "didn't", "Jaja's"
+ * and "well-known" stay whole, while quote marks and "--" separate words.
+ */
 int joiner_len(const unsigned char *p, char *as)
 {
     if (*p == '\'' || *p == '-')
@@ -244,7 +211,8 @@ int joiner_len(const unsigned char *p, char *as)
 /*
  * Extracts the next word at *cursor into out (lowercased, at most MAX_WORD_LEN
  * bytes) and moves *cursor past it. Returns the word's length in characters,
- * or 0 when the text has no more words.
+ * or 0 when the text has no more words. Accented letters stay in the word and
+ * count as one character each, even though UTF-8 stores them in 2 bytes.
  */
 int next_word(const char **cursor, char *out, int *truncated)
 {
@@ -268,13 +236,15 @@ int next_word(const char **cursor, char *out, int *truncated)
             /* Only copy whole characters so a cut never splits a UTF-8 sequence */
             if (!full && dst + n <= end)
             {
+                /* Lowercase so "Papa" and "papa" are the same word */
                 if (n == 1)
                     *dst++ = (char)tolower(*p);
                 else
                 {
                     memcpy(dst, p, n);
 
-                    /* Accented Latin-1 capitals C3 80..C3 9E (except the sign at C3 97) */
+                    /* Lowercase accented capitals too, so "Étagère" matches "étagère".
+                       They are C3 80..C3 9E in UTF-8, except the multiplication sign at C3 97 */
                     if (n == 2 && p[0] == 0xC3 && p[1] <= 0x9E && p[1] != 0x97)
                         dst[1] = (char)(p[1] + 0x20);
 
@@ -666,6 +636,7 @@ void display_word_statistics(TextAnalysis *t)
     printf("Distinct words: %d   Total words: %d\n", t->distinct, t->total_words);
 }
 
+/* strcmp compares bytes, so words starting with an accented letter sort after "z" */
 int compare_alphabetical(const void *a, const void *b)
 {
     return strcmp(((const struct wordStat *)a)->name, ((const struct wordStat *)b)->name);
@@ -735,9 +706,11 @@ void search_word(TextAnalysis *t)
 }
 
 /*
- * Moving-average type-token ratio: slides a window of MATTR_WINDOW words over
- * the text and averages the TTR of every window. Returns -1 when the text is
- * shorter than one window or memory runs out.
+ * Moving-average type-token ratio (MATTR): slides a window of MATTR_WINDOW
+ * words over the text and averages (distinct words / window size) over every
+ * window. Plain TTR falls as a text gets longer because common words keep
+ * coming back; MATTR always measures same-sized windows, so it has no length
+ * bias. Returns -1 when the text is shorter than one window or memory runs out.
  */
 double moving_average_ttr(const TextAnalysis *t)
 {
@@ -787,6 +760,12 @@ double moving_average_ttr(const TextAnalysis *t)
     return total / windows;
 }
 
+/*
+ * Custom analysis. N = total words, V = distinct words, V1 = words used once.
+ *   TTR = V / N, hapax ratio = V1 / V, repetition intensity = (N - V1) / N
+ * The verdict uses MATTR (plain TTR if the text is under 50 words) with these
+ * rough bands: >= 0.80 very varied, >= 0.70 varied, >= 0.60 moderate.
+ */
 void lexical_richness_profile(TextAnalysis *t)
 {
     int n = t->total_words;
