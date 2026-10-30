@@ -1,35 +1,8 @@
 /*
  * Dynamic IoT Event Monitoring and Callback Engine
  *
- * DEVICE TYPES, SIMULATED RANGES AND OPERATING LIMITS
- *   Type         Union member   Unit  Simulated range   Normal range
- *   Temperature  temperature    °C    10.0 to 50.0      15.0 to 40.0
- *   Pressure     pressure       kPa   80 to 130         95 to 115
- *   Battery      voltage        V     3.00 to 4.40      3.40 to 4.20
- *                                     (below 3.20 V is reported as critical)
- *   The simulated ranges are wider than the normal ranges on purpose, so both
- *   normal readings and alerts appear. All limits are #defines below.
- *
- * CALLBACK DISPATCH
- *   Each reading is passed to process_device() twice: first with the callback
- *   chosen from type_callbacks[device->type] (temperature_monitor,
- *   pressure_monitor or battery_monitor), then with the custom
- *   sensor_drift_detector. No callback reads a union member other than the one
- *   that matches device->type.
- *
- * CUSTOM CALLBACK: Sensor Drift Detector
- *   Purpose   - catches a sensor whose value jumps suddenly between two
- *               consecutive readings, which usually means a faulty sensor, a
- *               loose connection or a real sudden event, even when both values
- *               are inside the normal range.
- *   Algorithm - drift = |current reading - previous reading of the same device|
- *               if the device has no previous reading, the current one is
- *               stored as the baseline and nothing is flagged
- *               if drift > drift limit for the type, raise a drift alert
- *               the current reading then becomes the new previous reading
- *   Limits    - temperature 10.0 °C, pressure 15 kPa, battery 0.50 V
- *   Results   - number of comparisons, drift alerts per type and the largest
- *               jump seen, all shown in the monitoring summary.
+ * Simulates temperature, pressure and battery devices and passes each reading
+ * through callback functions, including a custom Sensor Drift Detector.
  *
  * Build: gcc -Wall -Wextra -o iot_monitor iot_monitor.c
  * Run:   iot_monitor          (seeds rand() with the current time)
@@ -41,12 +14,16 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <limits.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
-/* Simulated ranges and operating limits */
+/* Simulated ranges (SIM) are wider than the normal operating limits on purpose,
+   so both normal readings and alerts appear. DRIFT is the largest change allowed
+   between two consecutive readings of one device. */
 #define TEMP_SIM_MIN 10.0f
 #define TEMP_SIM_MAX 50.0f
 #define TEMP_MIN 15.0f
@@ -63,8 +40,12 @@
 #define VOLT_SIM_MAX 4.40f
 #define VOLT_MIN 3.40f
 #define VOLT_MAX 4.20f
-#define VOLT_CRITICAL 3.20f
+#define VOLT_CRITICAL 3.20f /* below this a low battery is reported as critical */
 #define VOLT_DRIFT 0.50f
+
+/* Each new reading steps at most half a drift limit from the last one, except
+   that this percentage of readings are sudden spikes of 1.2 to 2 drift limits */
+#define SPIKE_PERCENT 15
 
 #define NAME_LEN 40
 #define TEXT_LEN 96
@@ -76,6 +57,9 @@ enum DeviceStatus { STATUS_NO_READING, STATUS_NORMAL, STATUS_ALERT };
 const char *type_names[TYPE_COUNT] = {"Temperature", "Pressure", "Battery"};
 const char *type_units[TYPE_COUNT] = {"°C", "kPa", "V"};
 const int type_decimals[TYPE_COUNT] = {1, 0, 2};
+const float sim_min[TYPE_COUNT] = {TEMP_SIM_MIN, PRESSURE_SIM_MIN, VOLT_SIM_MIN};
+const float sim_max[TYPE_COUNT] = {TEMP_SIM_MAX, PRESSURE_SIM_MAX, VOLT_SIM_MAX};
+const float drift_limits[TYPE_COUNT] = {TEMP_DRIFT, PRESSURE_DRIFT, VOLT_DRIFT};
 const char *status_names[] = {"NO READING", "NORMAL", "ALERT"};
 
 /* Only the member that matches the device type is ever valid */
@@ -96,6 +80,10 @@ struct Device
 
     union DeviceReading previous; /* last processed reading, used by the drift detector */
     int has_previous;
+    int previous_in_range;
+
+    union DeviceReading last_generated; /* the simulator steps on from this value */
+    int has_generated;
     int readings_processed;
     int alert_count;
 };
@@ -145,6 +133,9 @@ struct
     int drift_alerts[TYPE_COUNT];
     int drift_checks;
     int baselines;
+    int recoveries;
+    int spikes_injected;
+    double largest_ratio; /* largest drift as a multiple of its type's limit */
     double largest_drift;
     int largest_drift_type;
     int largest_drift_id;
@@ -194,15 +185,18 @@ int get_int(const char *prompt, int *value)
         if (!read_line(line, sizeof line))
             return 0;
 
+        errno = 0;
         n = strtol(line, &end, 10);
 
-        if (end != line && *end == '\0')
+        if (end == line || *end != '\0')
+            printf("Invalid input. Enter a whole number.\n");
+        else if (errno == ERANGE || n > INT_MAX || n < INT_MIN)
+            printf("That number is too large.\n");
+        else
         {
             *value = (int)n;
             return 1;
         }
-
-        printf("Invalid input. Enter a whole number.\n");
     }
 }
 
@@ -248,29 +242,72 @@ float random_float(float min, float max)
     return min + (max - min) * ((float)rand() / RAND_MAX);
 }
 
+/* Scales rand() into the range instead of using %, which favours small values */
 int random_int(int min, int max)
 {
-    return min + rand() % (max - min + 1);
+    return min + (int)((double)rand() / ((double)RAND_MAX + 1.0) * (max - min + 1));
 }
 
-/* Fills the union member for the given type with a value in its simulated range */
-union DeviceReading simulate_reading(int type)
+/* Rounds a positive value to the decimals the type is shown with, so printed
+   readings and the differences between them add up */
+float round_reading(float value, int decimals)
 {
+    float scale = decimals == 2 ? 100.0f : decimals == 1 ? 10.0f : 1.0f;
+
+    return (float)(long)(value * scale + 0.5f) / scale;
+}
+
+/*
+ * Simulates the device's next reading as a random walk. The first reading is
+ * anywhere in the simulated range; after that each reading moves a small step
+ * from the last one, or occasionally spikes. *spiked reports which happened.
+ */
+union DeviceReading simulate_reading(struct Device *device, int *spiked)
+{
+    int type = device->type;
+    float limit = drift_limits[type];
     union DeviceReading r;
+    float next, step;
+
+    *spiked = 0;
+
+    if (!device->has_generated)
+        next = random_float(sim_min[type], sim_max[type]);
+    else
+    {
+        *spiked = random_int(1, 100) <= SPIKE_PERCENT;
+        step = *spiked ? random_float(1.2f, 2.0f) * limit : random_float(0.0f, 0.5f) * limit;
+
+        if (random_int(0, 1))
+            step = -step;
+
+        next = (float)reading_as_double(type, &device->last_generated) + step;
+
+        /* Step the other way rather than leave the simulated range */
+        if (next < sim_min[type] || next > sim_max[type])
+            next -= 2 * step;
+
+        if (next < sim_min[type])
+            next = sim_min[type];
+        else if (next > sim_max[type])
+            next = sim_max[type];
+    }
 
     switch (type)
     {
     case TEMPERATURE:
-        r.temperature = random_float(TEMP_SIM_MIN, TEMP_SIM_MAX);
+        r.temperature = round_reading(next, type_decimals[type]);
         break;
     case PRESSURE:
-        r.pressure = random_int(PRESSURE_SIM_MIN, PRESSURE_SIM_MAX);
+        r.pressure = (int)(next + 0.5f);
         break;
     default:
-        r.voltage = random_float(VOLT_SIM_MIN, VOLT_SIM_MAX);
+        r.voltage = round_reading(next, type_decimals[type]);
         break;
     }
 
+    device->last_generated = r;
+    device->has_generated = 1;
     return r;
 }
 
@@ -501,17 +538,37 @@ void battery_monitor(struct Device *device)
     raise_alert(device, __func__, expected, reason, 0);
 }
 
-/* Custom callback: flags a reading that jumps too far from the device's previous one */
+/*
+ * Custom callback: Sensor Drift Detector.
+ * Catches a sensor whose value jumps suddenly between two readings, which
+ * usually means a faulty sensor or loose connection, even when both values are
+ * inside the normal range.
+ *   drift = |current reading - previous reading of the same device|
+ *   no previous reading -> store this one as the baseline, flag nothing
+ *   drift > limit, but the jump brings an out-of-range device back into its
+ *                         normal range -> counted as a recovery, not flagged
+ *   drift > limit       -> raise a drift alert
+ * The current reading then becomes the previous one for next time. It must run
+ * after the type monitor, whose status says whether this reading is in range.
+ * The largest jump is ranked by drift / limit, so different units compare fairly.
+ */
 void sensor_drift_detector(struct Device *device)
 {
-    static const double drift_limits[TYPE_COUNT] = {TEMP_DRIFT, PRESSURE_DRIFT, VOLT_DRIFT};
     char expected[TEXT_LEN];
     char reason[TEXT_LEN];
     char before[32], now[32];
-    double limit = drift_limits[device->type];
-    int decimals = type_decimals[device->type];
-    double drift;
+    double limit, drift;
+    int decimals, in_range;
 
+    if (device->type < 0 || device->type >= TYPE_COUNT)
+    {
+        printf("    -> %s skipped: device %d has an unknown type\n", __func__, device->id);
+        return;
+    }
+
+    limit = drift_limits[device->type];
+    decimals = type_decimals[device->type];
+    in_range = device->status == STATUS_NORMAL;
     format_reading(now, sizeof now, device->type, &device->reading);
 
     if (!device->has_previous)
@@ -527,10 +584,13 @@ void sensor_drift_detector(struct Device *device)
         if (drift < 0)
             drift = -drift;
 
+        /* Compare the rounded difference, the same number the user sees */
+        drift = round_reading((float)drift, decimals);
         stats.drift_checks++;
 
-        if (drift > stats.largest_drift)
+        if (drift / limit > stats.largest_ratio)
         {
+            stats.largest_ratio = drift / limit;
             stats.largest_drift = drift;
             stats.largest_drift_type = device->type;
             stats.largest_drift_id = device->id;
@@ -541,7 +601,13 @@ void sensor_drift_detector(struct Device *device)
         snprintf(expected, sizeof expected, "change of at most %.*f %s", decimals, limit,
                  type_units[device->type]);
 
-        if (drift > limit)
+        if (drift > limit && in_range && !device->previous_in_range)
+        {
+            stats.recoveries++;
+            printf("    -> %-22s recovered: jumped %.*f %s from %s back into the normal range, not flagged\n",
+                   __func__, decimals, drift, type_units[device->type], before);
+        }
+        else if (drift > limit)
         {
             snprintf(reason, sizeof reason, "sudden jump of %.*f %s (from %s to %s)",
                      decimals, drift, type_units[device->type], before, now);
@@ -555,6 +621,7 @@ void sensor_drift_detector(struct Device *device)
     /* Copying the whole union keeps whichever member is active */
     device->previous = device->reading;
     device->has_previous = 1;
+    device->previous_in_range = in_range;
 }
 
 /* Runs one callback on one device */
@@ -570,7 +637,7 @@ void process_device(struct Device *device, void (*callback)(struct Device *))
 
 void register_device(void)
 {
-    char name[NAME_LEN];
+    char name[256];
     int id, type;
 
     printf("\nREGISTER A NEW DEVICE\n");
@@ -598,6 +665,12 @@ void register_device(void)
     if (name[0] == '\0')
     {
         printf("The device name cannot be empty.\n");
+        return;
+    }
+
+    if (strlen(name) >= NAME_LEN)
+    {
+        printf("The device name is too long (at most %d characters).\n", NAME_LEN - 1);
         return;
     }
 
@@ -680,7 +753,7 @@ void generate_readings(void)
     struct PendingReading *r;
     struct Device *d;
     char value[32];
-    int count, i;
+    int count, i, spiked;
 
     printf("\nGENERATE SIMULATED READINGS\n");
 
@@ -718,11 +791,12 @@ void generate_readings(void)
         r = pending + pending_count++;
         r->device_id = d->id;
         r->type = d->type;
-        r->value = simulate_reading(d->type);
+        r->value = simulate_reading(d, &spiked);
+        stats.spikes_injected += spiked;
 
         format_reading(value, sizeof value, r->type, &r->value);
-        printf("Queued reading %2d: device %d %-22s %-12s %s\n", pending_count, d->id, d->name,
-               type_names[d->type], value);
+        printf("Queued reading %2d: device %d %-22s %-12s %s%s\n", pending_count, d->id, d->name,
+               type_names[d->type], value, spiked ? "  (spike injected)" : "");
     }
 
     printf("%d reading(s) waiting to be processed.\n", pending_count);
@@ -756,6 +830,15 @@ void process_readings(void)
             continue;
         }
 
+        /* The ID was reused for a different type, so the queued union holds the wrong member */
+        if (d->type != r->type)
+        {
+            printf("\nDevice %d is now a %s device; its queued %s reading is skipped.\n",
+                   d->id, type_names[d->type], type_names[r->type]);
+            stats.skipped++;
+            continue;
+        }
+
         d->reading = r->value;
         d->readings_processed++;
         stats.processed++;
@@ -764,6 +847,7 @@ void process_readings(void)
         printf("\nReading %d | ID %d | %s | %s | %s\n", stats.processed, d->id, d->name,
                type_names[d->type], value);
 
+        /* The type's own monitor runs first, then the drift check runs on every type */
         process_device(d, type_callbacks[d->type]);
         process_device(d, sensor_drift_detector);
 
@@ -819,7 +903,7 @@ void monitoring_summary(void)
     printf("Readings processed:         %d\n", stats.processed);
     printf("Normal readings:            %d\n", stats.normal);
     printf("Abnormal readings:          %d\n", stats.abnormal);
-    printf("Skipped (device removed):   %d\n", stats.skipped);
+    printf("Skipped (removed/replaced): %d\n", stats.skipped);
     printf("Readings still queued:      %d\n", pending_count);
 
     printf("\nAlerts per device type\n");
@@ -834,11 +918,15 @@ void monitoring_summary(void)
     printf("Consecutive comparisons:    %d\n", stats.drift_checks);
     printf("Drift alerts:               %d\n",
            stats.drift_alerts[TEMPERATURE] + stats.drift_alerts[PRESSURE] + stats.drift_alerts[BATTERY]);
+    printf("Recoveries (not flagged):   %d\n", stats.recoveries);
+    printf("Spikes injected by the simulator: %d (each spike can be caught when it\n"
+           "  appears and again when the reading falls back)\n", stats.spikes_injected);
 
     if (stats.drift_checks > 0)
-        printf("Largest jump:               %.*f %s on device %d \"%s\"\n",
+        printf("Largest jump:               %.*f %s on device %d \"%s\" (%.1fx its drift limit)\n",
                type_decimals[stats.largest_drift_type], stats.largest_drift,
-               type_units[stats.largest_drift_type], stats.largest_drift_id, stats.largest_drift_name);
+               type_units[stats.largest_drift_type], stats.largest_drift_id, stats.largest_drift_name,
+               stats.largest_ratio);
 }
 
 /* ---------------------------------------------------------------------------
