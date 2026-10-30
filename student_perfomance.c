@@ -111,6 +111,42 @@ int id_search(int id)
     return -1;
 }
 
+int compare_grade(const void *a, const void *b)
+{
+    const students *stud_a = a;
+    const students *stud_b = b;
+
+    if (stud_a->grade > stud_b->grade)
+        return -1;
+
+    if (stud_a->grade < stud_b->grade)
+        return 1;
+
+    return 0;
+}
+
+int compare_id(const void *a, const void *b)
+{
+    const students *student_a = a;
+    const students *student_b = b;
+
+    if (student_a->id < student_b->id)
+        return -1;
+
+    if (student_a->id > student_b->id)
+        return 1;
+
+    return 0;
+}
+
+int compare_name(const void *a, const void *b)
+{
+    const students *student_a = a;
+    const students *student_b = b;
+
+    return strcmp(student_a->name, student_b->name);
+}
+
 void search_student()
 {
     int id, index;
@@ -171,6 +207,33 @@ void add_student()
     count++;
 
 }
+
+void display_students()
+{
+
+}
+
+
+void sort_students()
+{
+    int sort_type;
+    if (get_number("What do you want to sort the student records by?\n0.Student ID: \n1.Studenst Grades: \n2.Student Names: \nType in a number between 0-2: ", &sort_type, 'i')!=1)
+        return;
+    if (sort_type > 2)
+    {
+        printf("Input a value between 0 - 2");
+        return;
+    }
+    int (*sort_func[3]) (const void *a,const void *b) = {compare_id, compare_grade, compare_name};
+    qsort(s, count, sizeof(students),sort_func[sort_type]);
+    printf("\nSorted succesfully, here's the new order of records\n");
+    for (int i = 0; i < count; i++)
+    {
+        printf("%d, %s, %s, %.2f\n", s[i].id, s[i].name, s[i].course, s[i].grade);
+    }
+}
+
+
 int main(void)
 {
 //create our own dataset
@@ -198,14 +261,14 @@ int main(void)
     }
 
     //initialize an array of funtion pointers
-    void (*fun_ptr[])(void) = {add_student, search_student};
+    void (*fun_ptr[])(void) = {add_student, search_student, sort_students};
     int choice, ch;
     do
     {
         printf("\nMenu:\n");
         printf("0. Add Student\n");
         printf("1. Search for a Student\n");
-        printf("2. Delete Record\n");
+        printf("2. Sort Students\n\n");
         printf("3. Exit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
